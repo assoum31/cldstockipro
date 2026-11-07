@@ -52,7 +52,7 @@ npm install -D @types/bcryptjs vitest
 ```
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://akovwpscqsxeouoxmqwu.supabase.co
+NEXT_PUBLIC_SUPABASE_URL=https://tctifgkzfpdpjdghoojy.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=<copier depuis Supabase → Settings → API>
 SUPABASE_SERVICE_ROLE_KEY=<idem, clé service_role — jamais NEXT_PUBLIC_>
 ```

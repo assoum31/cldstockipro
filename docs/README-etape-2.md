@@ -15,7 +15,7 @@ npm install -D @types/bcryptjs
 `.env.local` (ne jamais commiter) :
 
 ```env
-NEXT_PUBLIC_SUPABASE_URL=https://akovwpscqsxeouoxmqwu.supabase.co
+NEXT_PUBLIC_SUPABASE_URL=https://tctifgkzfpdpjdghoojy.supabase.co
 NEXT_PUBLIC_SUPABASE_ANON_KEY=xxx        # clé anon/publishable
 SUPABASE_SERVICE_ROLE_KEY=xxx            # clé service_role — SERVEUR UNIQUEMENT
 ```

@@ -6,7 +6,7 @@ Supabase (Postgres, Auth, RLS, Realtime).
 ## الحالة الحالية
 
 - **قاعدة البيانات**: حقيقية وجاهزة على Supabase، المشروع `StockiPro`
-  (`akovwpscqsxeouoxmqwu`) — Schema + RLS + migrations كاملة،
+  (`tctifgkzfpdpjdghoojy`) — Schema + RLS + migrations كاملة،
   security advisor = 0 alertes، الـ isolation بين المتاجر مختبرة.
 - **الكود**: كل الصفحات والـ server actions جاهزة (login، scan،
   dashboard، admin) — تفاصيل كل مرحلة في [`docs/`](./docs).

@@ -11,6 +11,12 @@ describe("Supabase project URL", () => {
     expect(normalizeSupabaseUrl(url)).toBe("https://example.supabase.co");
   });
 
+  it("normalizes REST endpoints with trailing slash", () => {
+    expect(
+      normalizeSupabaseUrl("https://tctifgkzfpdpjdghoojy.supabase.co/rest/v1/")
+    ).toBe("https://tctifgkzfpdpjdghoojy.supabase.co");
+  });
+
   it.each([undefined, "", "   "])("rejects missing configuration", (url) => {
     expect(() => normalizeSupabaseUrl(url)).toThrow("Supabase project URL is not configured.");
   });
