@@ -12,7 +12,6 @@ type Step =
 
 export default function LoginPage() {
   const router = useRouter();
-  const supabase = createClient();
   const [isPending, startTransition] = useTransition();
   const [step, setStep] = useState<Step>({ name: "credentials" });
   const [error, setError] = useState<string | null>(null);
@@ -46,7 +45,7 @@ export default function LoginPage() {
     const password = String(formData.get("password") ?? "");
 
     startTransition(async () => {
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      const { error: signInError } = await createClient().auth.signInWithPassword({
         email,
         password,
       });
@@ -71,7 +70,7 @@ export default function LoginPage() {
         return;
       }
       const email = step.name === "activate" ? step.email : "";
-      const { error: signInError } = await supabase.auth.signInWithPassword({
+      const { error: signInError } = await createClient().auth.signInWithPassword({
         email,
         password: newPassword,
       });

@@ -1,6 +1,6 @@
 "use client";
 
-import { useCallback, useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { createClient } from "@/lib/supabase/client";
 import {
   listSessions,
@@ -49,8 +49,6 @@ function EcartBadge({ ecart }: { ecart: number }) {
 }
 
 export default function DashboardPage() {
-  const supabase = useRef(createClient()).current;
-
   const [sessions, setSessions] = useState<SessionRow[]>([]);
   const [selectedSessionId, setSelectedSessionId] = useState<string | null>(null);
   const [rows, setRows] = useState<DiscrepancyRow[]>([]);
@@ -94,6 +92,7 @@ export default function DashboardPage() {
   // On se contente de refetch la vue d'écart à chaque mouvement —
   // simple et largement suffisant pour le volume d'un inventaire.
   useEffect(() => {
+    const supabase = createClient();
     const channel = supabase
       .channel("inventory_logs_changes")
       .on(
@@ -108,7 +107,7 @@ export default function DashboardPage() {
     return () => {
       supabase.removeChannel(channel);
     };
-  }, [supabase, refreshDiscrepancies]);
+  }, [refreshDiscrepancies]);
 
   const selectedSession = sessions.find((s) => s.id === selectedSessionId) ?? null;
 

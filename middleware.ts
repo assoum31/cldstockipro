@@ -11,33 +11,34 @@ export async function middleware(request: NextRequest) {
   const { supabaseResponse, user } = await updateSession(request);
   const { pathname } = request.nextUrl;
 
+  function redirectTo(pathname: string) {
+    const url = request.nextUrl.clone();
+    url.pathname = pathname;
+    const response = NextResponse.redirect(url);
+    // Keep refreshed auth cookies when routing to another page.
+    supabaseResponse.cookies.getAll().forEach((cookie) => response.cookies.set(cookie));
+    return response;
+  }
+
   const isLoginRoute = pathname === "/login";
 
   if (!user && !isLoginRoute) {
-    const url = request.nextUrl.clone();
-    url.pathname = "/login";
-    return NextResponse.redirect(url);
+    return redirectTo("/login");
   }
 
   if (user) {
     const role = (user.app_metadata as { role?: string } | undefined)?.role;
 
-    if (isLoginRoute) {
-      const url = request.nextUrl.clone();
-      url.pathname = role === "auditor" ? "/scan" : "/dashboard";
-      return NextResponse.redirect(url);
+    if (isLoginRoute || pathname === "/") {
+      return redirectTo(role === "auditor" ? "/scan" : role === "master" ? "/admin" : "/dashboard");
     }
 
     if (role === "auditor" && !pathname.startsWith("/scan")) {
-      const url = request.nextUrl.clone();
-      url.pathname = "/scan";
-      return NextResponse.redirect(url);
+      return redirectTo("/scan");
     }
 
     if (pathname.startsWith("/admin") && role !== "master") {
-      const url = request.nextUrl.clone();
-      url.pathname = "/dashboard";
-      return NextResponse.redirect(url);
+      return redirectTo("/dashboard");
     }
   }
 

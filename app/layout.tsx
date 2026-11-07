@@ -8,14 +8,9 @@ const cairo = Cairo({
   display: "swap",
 });
 
-// Verrouillage du viewport (section 5B de la spec) : pas de zoom, pas
-// de rebond de scroll, couvre les encoches (viewportFit: "cover") —
-// nécessaire pour le /scan plein écran en entrepôt.
 export const viewport: Viewport = {
   width: "device-width",
   initialScale: 1,
-  maximumScale: 1,
-  userScalable: false,
   viewportFit: "cover",
 };
 
