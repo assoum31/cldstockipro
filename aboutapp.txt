@@ -1,0 +1,319 @@
+================================================================================
+                           STOCKIPRO APPLICATION DOSSIER
+             COMPLETE RAPPORT, ARCHITECTURE & DETAILED SPECIFICATION
+                      ENGLISH & ARABIC / باللغتين العربية والإنجليزية
+================================================================================
+
+================================================================================
+PART 1: ENGLISH VERSION
+================================================================================
+
+1. EXECUTIVE SUMMARY & APPLICATION PURPOSE
+--------------------------------------------------------------------------------
+StockiPro (v1.2.0) is a high-performance, multi-tenant Software-as-a-Service (SaaS)
+designed specifically for real-time inventory counting, warehouse audits, and stock
+discrepancy reconciliation. It bridges the operational gap between frontline warehouse
+auditors scanning physical barcodes on shop floors/warehouses and business administrators
+supervising inventory variance, discrepancies, and stock ledger synchronization in
+real time.
+
+Key Objectives:
+- Fast, mobile-first inventory counting using mobile device cameras without expensive
+  proprietary barcode terminals.
+- Instant duplicate count detection and location collision warnings to prevent double counts.
+- Seamless offline resilience via IndexedDB caching when warehouse network connectivity drops.
+- Real-time stock variance computation (Physical Count vs System Snapshot) with instant
+  Postgres Realtime event broadcasts.
+- Robust multi-tenant isolation guaranteeing zero data leakage between different stores/tenants.
+- Frictionless worker onboarding using single-use 6-digit setup PINs without exposing real email
+  addresses to frontline workers.
+
+
+2. ARCHITECTURE & SYSTEM DESIGN
+--------------------------------------------------------------------------------
+StockiPro is engineered using a modern full-stack web architecture leveraging Next.js
+(App Router) and Supabase (Postgres, Auth, Realtime, Row-Level Security).
+
+A. Architectural Layers:
+1. Presentation & Client Layer (Browser):
+   - Next.js 15 Client Components ('use client') optimized for mobile touch and warehouse usage.
+   - html5-qrcode engine interfacing directly with browser media stream for low-latency barcode decoding.
+   - IndexedDB local queue ('stockipro-offline') providing persistent storage for counts submitted during offline periods.
+   - SheetJS (xlsx) for fast client-side parsing and generation of Excel audit files.
+   - Realtime Supabase websocket channel listening to 'inventory_logs' change events.
+
+2. Application & Routing Layer (Next.js App Router):
+   - Global Edge/Server Middleware ('middleware.ts') providing proactive Route Guarding and Role-Based Access Control (RBAC).
+   - Server Actions ('use server') handling business mutations, authorization checks, and database transactions.
+   - Two Supabase client instances:
+     * Server Client ('lib/supabase/server.ts'): Uses user session cookies, strictly constrained by Supabase Row-Level Security (RLS).
+     * Service Role Admin Client ('lib/supabase/admin.ts'): Bypasses RLS strictly on the server for provisioning, PIN management, and system snapshot locking.
+
+3. Database & Security Layer (Supabase / PostgreSQL):
+   - PostgreSQL 15+ database schema with custom schemas ('public' and 'private').
+   - Row-Level Security (RLS) enabled on all application tables with zero security advisor alerts.
+   - Helper security definer functions in 'private' schema ('private.get_user_tenant_id()', 'private.is_master()').
+   - Dynamic real-time calculation view: 'public.inventory_discrepancies' configured with 'security_invoker = true'.
+   - Unique constraints preventing multiple concurrent active inventory sessions per tenant.
+
+B. Directory Structure Breakdown:
+- app/
+  - layout.tsx: Global root layout, Cairo font integration, RTL configuration, and viewport locking (prevents pinch-zoom and bounce scrolling).
+  - globals.css: Global styles with Tailwind CSS, touch-action manipulations, and overscroll-behavior locks.
+  - middleware.ts: Edge session validation and path restriction (Auditor -> /scan, Admin -> /dashboard, Master -> /admin).
+  - login/
+    - page.tsx: Two-step authentication UI (Tenant code + Username lookup -> Password prompt OR First-Time Activation with PIN).
+    - actions.ts: 'lookupAccount' (anti-enumeration lookup), 'activateAccount' (PIN verification and initial password setting).
+  - scan/
+    - page.tsx: Camera scanner viewport, duplicate detection alert modal, count modification/submission, offline status banner.
+    - actions.ts: 'getActiveSession', 'lookupBarcode', 'submitCount' (log creation/updating with auditor verification).
+  - dashboard/
+    - page.tsx: Inventory session management, live discrepancy data grid, Excel export/import controls.
+    - actions.ts: 'listSessions', 'createSession', 'lockSession', 'completeSession', 'getDiscrepancies', 'bulkUpsertProducts', 'getSessionLogsForExport'.
+  - admin/
+    - page.tsx: Master super-admin dashboard for creating tenants, activating/deactivating tenants, and viewing store stats.
+    - actions.ts: 'listTenants', 'createTenant', 'setTenantActive', 'getTenantStats'.
+  - (admin)/workers/
+    - page.tsx: Store worker management UI: auditor listing, worker provisioning, single-use PIN display, PIN regeneration, worker ban/deactivation.
+    - actions.ts: 'createWorker', 'listWorkers', 'regeneratePin', 'setWorkerActive'.
+- components/
+  - logout-button.tsx: Universal signOut button interacting with Supabase auth and cache invalidation.
+- lib/
+  - auth-helpers.ts: Deterministic synthetic email generation ('user@tenant.stockipro.internal'), cryptographically secure PIN generation, and bcrypt hashing.
+  - excel.ts: Browser-native SheetJS template generator, import parser with leading-zero preservation, and audit spreadsheet builder.
+  - offline-queue.ts: Browser IndexedDB abstraction for queued inventory counts and network error heuristics.
+  - supabase/
+    - client.ts: Browser client for client-side Auth and Realtime subscriptions.
+    - server.ts: Server client utilizing Next.js cookies for RLS compliance.
+    - middleware.ts: Cookie-refreshing session handler for Next.js middleware.
+    - admin.ts: Privileged service_role client for administrative tasks.
+- tests/
+  - auth-helpers.test.ts: Vitest suite covering email generation, PIN randomness, and bcrypt hash verification.
+  - offline-queue.test.ts: Vitest suite validating offline queue network error detection.
+- docs/
+  - README-etape-2.md through README-etape-7-FINAL.md: Historical incremental phase documentations.
+
+
+3. CORE MODULES & FUNCTIONALITY
+--------------------------------------------------------------------------------
+A. Authentication & Multi-Tenancy Engine:
+- Zero Email Exposure: Warehouse workers only remember their Store Code, Username, and PIN/Password.
+- The system generates an internal RFC-compliant synthetic email:
+  '{username}@{tenant_code}.stockipro.internal'.
+- Two-Phase Login Flow:
+  1. Lookup: Validates that the tenant exists and is active, then checks if the user is active. Determines if the account has a password or needs initial activation.
+  2. If 'needs_activation': Worker enters their 6-digit PIN and chooses a new 8+ character password. The bcrypt hash is validated, PIN is cleared, and Supabase Auth credentials are set.
+  3. If 'has_password': Standard password authentication via Supabase Auth.
+- Account Deactivation Double-Lock:
+  Worker deactivation marks 'is_active = false' in 'app_users' (blocking lookup) and sets a ban duration on Supabase Auth ('876000h'), preventing any bypass.
+
+B. Barcode Scanner & Frontline Counting (/scan):
+- Camera Barcode Reader: html5-qrcode directly scanning 1D and 2D barcodes.
+- Duplicate Detection: As soon as a barcode is scanned or entered, 'lookupBarcode' checks if that item was already counted in the active session. If counted:
+  * Visual Warning Card displays previous count, location, timestamp, and who counted it.
+  * Worker can switch between 'Create new count' or 'Update/correct existing count' (auditors can only edit their own counts).
+- Offline Mode (IndexedDB Queue):
+  * When submitting a count without internet connectivity (detected via network TypeError), the record is safely placed into the browser's IndexedDB 'pending_counts' store.
+  * UI displays a badge: 'X counts pending upload'.
+  * Automatically resyncs and flushes when the browser fires the 'online' event or upon the next successful submission.
+
+C. Inventory Dashboard & Live Discrepancies (/dashboard):
+- Session Lifecycle:
+  * 'active': Open for counting. Only one active session is allowed per store.
+  * 'locked': System snapshot frozen into 'inventory_session_snapshots'. Counts are compared against snapshot quantities.
+  * 'completed': Session finalized and closed.
+- Real-Time Discrepancy Matrix:
+  * Subscribes to PostgreSQL Realtime events on 'inventory_logs'.
+  * Dynamically queries the 'inventory_discrepancies' view to show:
+    Barcode, Product Name, Category, Location, System Quantity, Counted Quantity, Variance (Écart = Counted - System), and Status badge (Positive/Negative/Zero).
+- Excel Management:
+  * Template generation: 'Stocki_Inventory_Template.xlsx' with standardized columns.
+  * Mass Import: Parses Excel files preserving leading barcode zeros, executing batch upserts of up to 500 records at a time under store RLS.
+  * Audit Export: Exports all raw counting logs to Excel with timestamp, auditor name, barcode, and location.
+
+D. Worker Administration (/(admin)/workers):
+- Admins can provision new warehouse auditors.
+- Generates a 6-digit temporary PIN with a 24-hour expiration window.
+- PIN is displayed exactly once on screen.
+- Admins can regenerate PINs or toggle worker activation status.
+
+E. Master Super-Admin (/admin):
+- Restricted exclusively to users with the 'master' role.
+- Tenant Onboarding: Generates 6-character clean alphanumeric store codes (avoiding confusing glyphs 0/O/1/I).
+- Tenant Activation/Deactivation: Instantly cuts off store access across all users in that tenant.
+- Store Analytics: On-demand telemetry of total products, active sessions, and counting logs.
+
+
+4. DATABASE SCHEMA & SECURITY POLICIES (RLS)
+--------------------------------------------------------------------------------
+A. Tables:
+- 'tenants': Store organizations (id, name, code, is_active, created_at).
+- 'app_users': Multi-tenant user profiles (id -> auth.users.id, tenant_id, role, username, full_name, activation_code_hash, activation_expires_at, activated_at, is_active). Roles: 'master', 'admin', 'auditor'.
+- 'products': Store catalog (id, tenant_id, barcode, name, category, default_location, system_quantity, purchase_price, sale_price).
+- 'inventory_sessions': Counting sessions (id, tenant_id, title, status, locked_at, completed_at). Constraint: 1 active session per tenant.
+- 'inventory_session_snapshots': Frozen catalog snapshot taken at session lock (id, session_id, product_id, system_quantity).
+- 'inventory_logs': Physical count events (id, session_id, product_id, barcode, counted_quantity, location, counted_by, counted_at).
+
+B. View:
+- 'inventory_discrepancies': Security-invoker view aggregating counted quantities vs system/snapshot quantities to compute real-time variance.
+
+C. Row-Level Security:
+- Security Definer Helpers: 'private.get_user_tenant_id()' resolves caller tenant; 'private.is_master()' validates super-admin role.
+- Tenant Isolation: Every query on products, sessions, snapshots, and logs is constrained by 'tenant_id = private.get_user_tenant_id()' OR 'private.is_master()'.
+- Role Isolation: Auditors can only read/insert logs in active sessions and update their own logs.
+
+
+5. TECHNICAL RAPPORT & STATUS ASSESSMENT
+--------------------------------------------------------------------------------
+- Database State: Production-ready on Supabase, schema complete, migrations applied, 0 security advisor alerts.
+- Business Logic: Complete and robust across server actions, offline synchronization, and excel processing.
+- Frontend & UI: Functional, responsive, mobile-locked, RTL-configured with Cairo typography; visual design uses basic Tailwind utilities and would benefit from branding polish before public commercial launch.
+- Test Coverage: Unit tests verify synthetic email generation, PIN generation/hashing, and offline network error detection.
+
+================================================================================
+PART 2: ARABIC VERSION / النسخة العربية
+================================================================================
+
+1. الملخص التنفيذي والهدف من التطبيق
+--------------------------------------------------------------------------------
+تطبيق StockiPro (الإصدار v1.2.0) هو منصة برمجية كخدمة (SaaS) متعددة المتاجر (Multi-Tenant)،
+مخصصة لإجراء عمليات جرد المخزون الفوري بدقة وسرعة فائقة في المستودعات والمحلات التجارية.
+يربط التطبيق بين العمال الميدانيين (المراجعين/Auditors) الذين يمسحون الباركود بكاميرات هواتفهم،
+وبين المدراء وأصحاب المتاجر في لوحة التحكم لمتابعة الفوارق الحسابية (Écart) في الوقت الحقيقي.
+
+الأهداف الجوهرية للتطبيق:
+- الاستغناء عن أجهزة الجرد المكلفة (Data Collectors/Terminals) واستبدالها بكاميرات الهواتف الذكية.
+- الكشف التلقائي والفوري عن الباركود المكرر والتحذير من تكرار عد المنتج في نفس الموقع أو بواسطة مدقق آخر.
+- الاستمرارية في العمل حتى في حال انقطاع شبكة الإنترنت داخل المستودع بفضل قائمة الانتظار المحلية (IndexedDB).
+- حساب الفوارق بين المخزون النظري والمخزون الفعلي (Écart) فورياً ومباشرة عبر قنوات Supabase Realtime.
+- عزل تام ومحكم لبيانات المتاجر بحيث يستحيل على أي متجر رؤية بيانات المتاجر الأخرى بفضل سياسات الأمان (RLS).
+- تسجيل دخول مبسط للعمال عبر رمز المتجر واسم المستخدم ورقم سري مؤقت (PIN) دون الحاجة لبريد إلكتروني حقيقي.
+
+
+2. البنية الهندسية وتصميم النظام (System Architecture)
+--------------------------------------------------------------------------------
+تم بناء StockiPro باستخدام أحدث تقنيات الويب الحديثة بالاعتماد على Next.js 15 (App Router)
+ومنظومة Supabase السحابية (قاعدة بيانات PostgreSQL، المصادقة Auth، الجداول الفورية Realtime،
+وسياسات الأمان على مستوى الصف Row-Level Security).
+
+أ. الطبقات المعمارية للتطبيق:
+1. طبقة العرض والواجهة الأمامية (Client Layer):
+   - واجهات تفاعلية مبنية بمكونات React 19 Client Components المصممة خصيصاً للاستخدام باللمس على الهواتف.
+   - مكتبة 'html5-qrcode' للاتصال المباشر مع كاميرا الهاتف وقراءة الباركود بسرعة استجابة عالية.
+   - قاعدة بيانات داخل المتصفح (IndexedDB) باسم 'stockipro-offline' لحفظ عمليات الجرد في وضع عدم الاتصال.
+   - مكتبة 'xlsx' لمعالجة واستيراد وتصدير ملفات إكسل داخل المتصفح بسرعة فائقة.
+   - اتصال Realtime عبر WebSockets للاستماع المباشر للتغييرات في جدول عمليات الجرد 'inventory_logs'.
+
+2. طبقة المنطق والمسارات (Application & Server Layer):
+   - طبقة حراسة مركزية (Middleware) لفحص الجلسات والصلاحيات (توجيه المدقق لصفحة الماسح، وتوجيه المدير للوحة التحكم، وتوجيه المدير العام لصفحة الإدارة).
+   - دوال الخادم (Server Actions) المدمجة لتنفيذ العمليات الحساسة بأمان دون كشف المفاتيح البرمجية.
+   - نموذجان من عملاء Supabase:
+     * عميل الخادم العادي (Server Client): يعمل بكوكيز جلسة المستخدم ويخضع كلياً لسياسات الأمان RLS.
+     * عميل الإدارة (Admin Client): يستخدم مفتاح 'service_role' السري لتنفيذ مهام النظام العليا فقط (تفعيل الحسابات، تجميد اللقطات، إنشاء المتاجر).
+
+3. طبقة قاعدة البيانات والأمان (Database & RLS Layer):
+   - قاعدة بيانات PostgreSQL مهيكلة مع مخططين: 'public' للبيانات التشغيلية و 'private' للدوال الأمنية.
+   - سياسات الأمان على مستوى الصف (RLS) مفعلة على 100% من الجداول مع 0 تحذير أمني في فاحص Supabase.
+   - دوال فحص الهوية الأمنية ('private.get_user_tenant_id()' و 'private.is_master()').
+   - عرض مركب ديناميكي لحساب الفوارق 'public.inventory_discrepancies' بوضع 'security_invoker = true'.
+   - قيود قاعدة بيانات تمنع وجود أكثر من جلسة جرد نشطة واحدة لنفس المتجر في نفس الوقت.
+
+ب. خريطة الملفات والمجلدات:
+- app/
+  - layout.tsx: القالب الرئيسي، خط Cairo العربي، اتجاه RTL، وقفل شاشة العرض (منع التكبير العشوائي والتمرير الارتدادي).
+  - globals.css: تنسيقات Tailwind وضبط سلوك اللمس والتمرير لبيئة المستودعات.
+  - middleware.ts: مراقبة الجلسات وتوجيه المستخدمين حسب الأدوار.
+  - login/
+    - page.tsx: واجهة تسجيل الدخول بخطوتين (البحث عن الحساب -> كلمة المرور أو شاشة أول تفعيل بالـ PIN).
+    - actions.ts: دوال البحث الآمن 'lookupAccount' والتفعيل وتعيين كلمة المرور 'activateAccount'.
+  - scan/
+    - page.tsx: شاشة الماسح الضوئي، كاميرا قراءة الباركود، بطاقة التحذير من التكرار، نموذج الإدخال، وشارة وضع عدم الاتصال.
+    - actions.ts: دوال استعلام الجلسة النشطة، فحص الباركود، وتسجيل الكميات المعدودة.
+  - dashboard/
+    - page.tsx: لوحة التحكم الإدارية، إدارة الجلسات، جدول الفوارق اللحظي، واستيراد وتصدير إكسل.
+    - actions.ts: إنشاء وقفل وإغلاق الجلسات، جلب الفوارق، التحديث الجماعي للمنتجات، وتصدير التقارير.
+  - admin/
+    - page.tsx: لوحة تحكم المدير العام (Master Admin) لإدارة المتاجر وتفعيلها وعرض الإحصائيات.
+    - actions.ts: قائمة المتاجر، إنشاء متجر جديد، تفعيل/تعطيل المتجر، وجلب الإحصائيات.
+  - (admin)/workers/
+    - page.tsx: شاشة إدارة عمال الجرد في المتجر، إضافة عامل جديد، عرض الـ PIN لمرة واحدة، إعادة تعيين PIN، وتعطيل العمال.
+    - actions.ts: دوال إنشاء العمال، إدراجهم، تجديد أرقام PIN، وتغيير حالة التنشيط.
+- components/
+  - logout-button.tsx: زر تسجيل الخروج الموحد.
+- lib/
+  - auth-helpers.ts: إنشاء الإيميل الاصطناعي، توليد الـ PIN العشوائي (6 أرقام)، وتشفيره وفحصه عبر bcrypt.
+  - excel.ts: تنزيل قالب الإكسل، قراءة ملفات الإكسل مع الحفاظ على أصفار الباركود الأولى، وتصدير سجلات الجرد.
+  - offline-queue.ts: إدارة قاعدة بيانات IndexedDB لحفظ عمليات الجرد عند انقطاع الإنترنت وإعادة إرسالها تلقائياً.
+  - supabase/: تهيئة عملاء Supabase للمتصفح، الخادم، وحارس الجلسات، والمشرف العام.
+- tests/
+  - auth-helpers.test.ts: اختبارات برمجية للتحقق من سلامة الإيميلات وتوليد الـ PIN وتشفيره.
+  - offline-queue.test.ts: اختبارات برمجية للتحقق من كشف أخطاء الشبكة لوضع عدم الاتصال.
+- docs/
+  - وثائق مراحل البناء والتطوير السابقة (من المرحلة 2 إلى المرحلة 7 النهائية).
+
+
+3. الوحدات الوظيفية التفصيلية (Features & Functional Modules)
+--------------------------------------------------------------------------------
+أ. نظام المصادقة والحسابات متعددة المتاجر (Multi-Tenant Auth):
+- عدم استخدام إيميلات حقيقية للعمال: يدخل العامل (رمز المتجر + اسم المستخدم + PIN لأول مرة أو كلمة المرور).
+- يقوم النظام داخلياً بتوليد إيميل قياسي موحد: '{username}@{tenant_code}.stockipro.internal'.
+- مسار تسجيل الدخول بخطوتين لمنع التخمين وحماية الخصوصية.
+- القفل المزدوج لتعطيل الحسابات: عند تعطيل عامل يتم حظره في جدول المستخدمين وفي نظام المصادقة Supabase Auth لمدة 100 عام.
+
+ب. الماسح الضوئي وكشف التكرار والعمل دون اتصال (/scan):
+- قراءة فورية للباركود بكاميرا الهاتف المحمول.
+- التحذير التلقائي الفوري من التكرار: إذا تم مسح صنف سبق جرده في نفس الجلسة، تظهر بطاقة تحذيرية حمراء توضح الكمية السابقة، والموقع، والوقت، وهوية من قام بالعد، مع إمكانية تعديل الكمية السابقة أو إضافة كمية جديدة.
+- وضع العمل بلا اتصال (Offline Mode): في حال انقطاع الشبكة يتم حفظ السجل في IndexedDB مع إظهار عدد السجلات العالقة، وتتم مزامنتها تلقائياً بمجرد عودة الاتصال.
+
+ج. لوحة تحكم الجرد ومصفوفة الفوارق اللحظية (/dashboard):
+- دورة حياة جلسة الجرد:
+  * جلسة نشطة (Active): جلسة واحدة فقط لكل متجر في نفس الوقت لاستقبال عمليات المسح.
+  * جلسة مقفلة (Locked): تجميد لقطة النظام الحالية لمقارنة الفوارق بدقة وموثوقية عالية.
+  * جلسة مكتملة (Completed): إغلاق الجلسة وأرشفتها.
+- جدول الفوارق اللحظي: يتحدث تلقائياً عند أي عملية مسح في المستودع بدون الحاجة لإعادة تحميل الصفحة (عبر Realtime).
+- التعامل مع ملفات الإكسل:
+  * تنزيل قالب جرد فارغ معتمد.
+  * استيراد المنتجات جماعياً حتى 500 منتج في الدفعة مع الحفاظ على الأصفار التي تبدأ بها الباركودات.
+  * تصدير تقرير شامل لكافة عمليات الجرد بالوقت وهوية العامل والموقع.
+
+د. إدارة عمال الجرد (/(admin)/workers):
+- تمكين مدير المتجر من إضافة عمال الجرد.
+- إنشاء رمز PIN مؤقت من 6 أرقام صالح لمدة 24 ساعة يتم عرضه لمرة واحدة فقط لتسليمه للعامل.
+- إمكانية إعادة توليد رمز PIN جديد في حال نسيانه أو تعطيل حساب العامل فورياً.
+
+هـ. لوحة تحكم المشرف العام (/admin):
+- مخصصة حصرياً للمدير العام للنظام (Role: Master).
+- إضافة متاجر جديدة وتوليد رمز متجر فريد ومختصر من 6 حروف وأرقام واضحة لا تحتوي على رموز ملتبسة (مثل O و 0 و I و 1).
+- تفعيل وتعطيل المتاجر بنقرة واحدة لقطع الوصول فوراً عن أي متجر.
+- الاطلاع على إحصائيات كل متجر (عدد المنتجات، الجلسات، سجلات الجرد).
+
+
+4. نماذج البيانات وسياسات الأمان (Database Schema & RLS)
+--------------------------------------------------------------------------------
+أ. الجداول الأساسية:
+- جدول المتاجر (tenants): يضم معرف المتجر، اسمه، رمزه المختصر، وحالته.
+- جدول المستخدمين (app_users): مرتبط مع auth.users، يحدد المتجر، الدور (master/admin/auditor)، اسم المستخدم، وهاش التفعيل.
+- جدول المنتجات (products): دليل المنتجات الخاص بالمتجر (الباركود، الاسم، التصنيف، الموقع الافتراضي، كمية النظام، أسعار الشراء والبيع).
+- جدول جلسات الجرد (inventory_sessions): سجل الجلسات وحالتها وتواريخ الإقفال.
+- جدول لقطات الجرد (inventory_session_snapshots): اللقطة المجمدة لكميات النظام وقت قفل الجلسة.
+- جدول سجلات الجرد (inventory_logs): كل عملية عد تجري في المستودع (الباركود، الكمية، الموقع، العامل، الوقت).
+
+ب. العرض المخصص (View):
+- 'inventory_discrepancies': يحسب الفارق الرياضي (Écart = الكمية المعدودة - كمية النظام) مع تحديد الأصناف المسجلة وتلك التي جردت خارج الكتالوج.
+
+ج. سياسات الأمان على مستوى الصف (RLS):
+- عزل تام للمتاجر مبني على هوية المستخدم في الـ JWT.
+- منع وصول أي متجر لسجلات أو منتجات متجر آخر مهما كانت المحاولات.
+- تحديد صلاحيات المدقق الميداني بحيث تقتصر على المسح وتعديل سجلاته الخاصة فقط أثناء الجلسات النشطة.
+
+
+5. التقرير الفني وحالة التطبيق الحالية (Technical Rapport)
+--------------------------------------------------------------------------------
+- حالة قاعدة البيانات: مكتملة تماماً، مستضافة على Supabase ومربوطة بالمشروع، خالية من أي ثغرات أمنية (0 Security Advisor Alerts).
+- حالة المنطق البرمجي: جاهز 100% ويغطي مسار المصادقة، والمسح، ومنع التكرار، وحساب الفوارق، وتصدير واستيراد الإكسل.
+- واجهة المستخدم: مكتملة وظيفياً وتدعم اللغة العربية واتجاه RTL وتمنع التكبير العشوائي أثناء العمل الميداني، وتحتاج لتطبيق هوية بصرية مخصصة (Branding) قبل الإطلاق التجاري العام.
+- الاختبارات: توجد اختبارات وحدة برمجية (Unit Tests) تغطي الدوال الحسابية والمصادقة وكشف أخطاء الشبكة.
+
+================================================================================
+                               END OF DOSSIER
+================================================================================
