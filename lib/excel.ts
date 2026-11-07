@@ -39,25 +39,36 @@ export function downloadProductTemplate() {
 }
 
 // Lit un .xlsx/.csv et le convertit en lignes typées pour
-// bulkUpsertProducts. { raw: false } force les cellules en chaînes
-// pour ne jamais perdre les zéros de tête d'un code-barres (sinon
-// "0001234" devient le nombre 1234).
+// bulkUpsertProducts. Les codes-barres utilisent le texte formaté,
+// les quantités et prix utilisent les valeurs numériques brutes.
 export async function parseProductImportFile(
   file: File
 ): Promise<ProductImportRow[]> {
   const buffer = await file.arrayBuffer();
-  const workbook = XLSX.read(buffer, { type: "array" });
+  const isCsv = file.name.toLowerCase().endsWith(".csv");
+  const workbook = isCsv
+    ? XLSX.read(new TextDecoder("utf-8").decode(buffer), { type: "string", raw: true })
+    : XLSX.read(buffer, { type: "array", raw: true });
   const firstSheetName = workbook.SheetNames[0];
   const sheet = workbook.Sheets[firstSheetName];
 
-  const rows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, {
+  if (!sheet) throw new Error("The workbook has no worksheet.");
+
+  // Read numeric cells as numbers: formatted values such as 1,234.50
+  // cannot be passed directly to Number(). CSV stays raw to retain barcodes.
+  const rows = XLSX.utils.sheet_to_json<Record<string, string | number>>(sheet, {
+    raw: true,
+    defval: "",
+  });
+
+  const formattedRows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, {
     raw: false,
     defval: "",
   });
 
   return rows
-    .map((row) => ({
-      barcode: String(row["الباركود"] ?? "").trim(),
+    .map((row, index) => ({
+      barcode: String(formattedRows[index]?.["الباركود"] ?? row["الباركود"] ?? "").trim(),
       name: String(row["اسم المنتج"] ?? "").trim(),
       category: String(row["التصنيف"] ?? "").trim() || null,
       default_location: String(row["الموقع الافتراضي"] ?? "").trim() || null,

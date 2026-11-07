@@ -1,7 +1,7 @@
 "use client";
 
 import { useCallback, useEffect, useRef, useState } from "react";
-import { Html5Qrcode } from "html5-qrcode";
+import { Html5Qrcode, Html5QrcodeScannerState } from "html5-qrcode";
 import { getActiveSession, lookupBarcode, submitCount } from "./actions";
 import {
   enqueuePendingCount,
@@ -53,28 +53,37 @@ export default function ScanPage() {
 
   const scannerRef = useRef<Html5Qrcode | null>(null);
   const pausedRef = useRef(false);
+  const syncingRef = useRef(false);
 
   // Rejoue la queue hors-ligne (IndexedDB) : appelée au montage, à
   // chaque retour réseau ('online'), et juste après chaque envoi
   // réussi (au cas où une entrée plus ancienne attendait déjà).
   const syncPendingCounts = useCallback(async () => {
-    const pending = await getAllPendingCounts();
-    setPendingCount(pending.length);
-    for (const entry of pending) {
-      const result = await submitCount(entry.payload).catch((err) => {
-        if (isNetworkError(err)) return null; // toujours hors-ligne, on réessaiera plus tard
-        return { ok: false as const, error: "فشل مزامنة سطر محفوظ محلياً." };
-      });
-      if (result === null) break; // pas la peine d'essayer les suivants maintenant
-      if (result.ok) {
-        await removePendingCount(entry.localId);
+    if (syncingRef.current) return;
+    syncingRef.current = true;
+    try {
+      const pending = await getAllPendingCounts();
+      setPendingCount(pending.length);
+      for (const entry of pending) {
+        const result = await submitCount(entry.payload).catch((err) => {
+          if (isNetworkError(err)) return null; // toujours hors-ligne, on réessaiera plus tard
+          return { ok: false as const, error: "فشل مزامنة سطر محفوظ محلياً." };
+        });
+        if (result === null) break; // pas la peine d'essayer les suivants maintenant
+        if (result.ok) {
+          await removePendingCount(entry.localId);
+        }
+        // Si result.ok === false pour une raison métier (pas réseau),
+        // on laisse l'entrée en queue : elle sera visible via
+        // pendingCount, à l'utilisateur de vérifier manuellement.
       }
-      // Si result.ok === false pour une raison métier (pas réseau),
-      // on laisse l'entrée en queue : elle sera visible via
-      // pendingCount, à l'utilisateur de vérifier manuellement.
+      const remaining = await getAllPendingCounts();
+      setPendingCount(remaining.length);
+    } catch {
+      setNotice("تعذر الوصول إلى الأسطر المحفوظة محلياً. تحقق من إعدادات التخزين.");
+    } finally {
+      syncingRef.current = false;
     }
-    const remaining = await getAllPendingCounts();
-    setPendingCount(remaining.length);
   }, []);
 
   useEffect(() => {
@@ -96,7 +105,7 @@ export default function ScanPage() {
         return;
       }
       setSession(result.session);
-    });
+    }).catch(() => setSessionError("تعذر تحميل جلسة الجرد. تحقق من الاتصال وأعد تحميل الصفحة."));
   }, []);
 
   const handleDecoded = useCallback(
@@ -104,10 +113,17 @@ export default function ScanPage() {
       if (pausedRef.current || !session) return;
       pausedRef.current = true;
 
-      if (navigator.vibrate) navigator.vibrate(100);
-      await scannerRef.current?.pause(true);
-
-      const result = await lookupBarcode(barcode, session.id);
+      setNotice(null);
+      let result;
+      try {
+        if (navigator.vibrate) navigator.vibrate(100);
+        scannerRef.current?.pause(true);
+        result = await lookupBarcode(barcode, session.id);
+      } catch {
+        setNotice("تعذر البحث عن المنتج. تحقق من الاتصال وحاول مجدداً.");
+        resumeScanning();
+        return;
+      }
       if (!result.ok) {
         setNotice(result.error);
         resumeScanning();
@@ -141,7 +157,8 @@ export default function ScanPage() {
     const scanner = new Html5Qrcode(SCANNER_ELEMENT_ID);
     scannerRef.current = scanner;
 
-    scanner
+    let disposed = false;
+    const startPromise = scanner
       .start(
         { facingMode: "environment" },
         { fps: 10, qrbox: { width: 220, height: 220 } },
@@ -151,11 +168,16 @@ export default function ScanPage() {
         undefined
       )
       .catch(() => {
+        if (disposed) return;
         setSessionError("تعذر الوصول إلى الكاميرا. تحقق من الأذونات.");
       });
 
     return () => {
-      scanner.stop().catch(() => {});
+      disposed = true;
+      void startPromise.then(async () => {
+        if (scanner.isScanning) await scanner.stop();
+        scanner.clear();
+      }).catch(() => {});
     };
     // handleDecoded ferme sur `session`, volontairement omis des deps
     // pour ne pas redémarrer la caméra à chaque scan.
@@ -167,13 +189,15 @@ export default function ScanPage() {
     setQuantity("");
     setLocation("");
     pausedRef.current = false;
-    scannerRef.current?.resume();
+    if (scannerRef.current?.getState() === Html5QrcodeScannerState.PAUSED) {
+      scannerRef.current.resume();
+    }
   }
 
   async function handleSubmit() {
-    if (!scanResult || !session) return;
+    if (!scanResult || !session || submitting) return;
     const qty = Number(quantity);
-    if (!Number.isFinite(qty) || qty < 0) {
+    if (!quantity.trim() || !Number.isFinite(qty) || qty < 0) {
       setNotice("الكمية غير صالحة.");
       return;
     }
@@ -192,7 +216,6 @@ export default function ScanPage() {
     setSubmitting(true);
     try {
       const result = await submitCount(payload);
-      setSubmitting(false);
 
       if (!result.ok) {
         setNotice(result.error);
@@ -203,7 +226,6 @@ export default function ScanPage() {
       resumeScanning();
       syncPendingCounts();
     } catch (err) {
-      setSubmitting(false);
       if (!isNetworkError(err)) {
         setNotice("حدث خطأ غير متوقع.");
         return;
@@ -211,10 +233,17 @@ export default function ScanPage() {
       // Pas de réseau : on garde le comptage localement, l'auditeur
       // peut continuer à scanner sans attendre — la synchronisation
       // se fera toute seule au retour de la connexion.
-      await enqueuePendingCount(payload);
+      try {
+        await enqueuePendingCount(payload);
+      } catch {
+        setNotice("تعذر الحفظ محلياً. أبقِ هذه الشاشة مفتوحة وحاول الحفظ مجدداً.");
+        return;
+      }
       setPendingCount((n) => n + 1);
       setNotice("لا يوجد اتصال — تم الحفظ محلياً، سيُرسل تلقائياً لاحقاً.");
       resumeScanning();
+    } finally {
+      setSubmitting(false);
     }
   }
 
@@ -234,7 +263,7 @@ export default function ScanPage() {
   return (
     <main
       dir="rtl"
-      className="min-h-dvh overflow-hidden overscroll-none touch-none bg-black text-white flex flex-col"
+      className="min-h-dvh overflow-hidden overscroll-none bg-black text-white flex flex-col"
     >
       <header className="p-3 text-center text-sm bg-neutral-900 flex items-center justify-center gap-2">
         <span>{session?.title ?? "..."}</span>
@@ -275,6 +304,7 @@ export default function ScanPage() {
               <div className="flex gap-2 pt-2">
                 <button
                   type="button"
+                  disabled={submitting}
                   onClick={() => setMode("update")}
                   className={`flex-1 rounded-lg p-2 text-sm ${
                     mode === "update" ? "bg-black text-white" : "bg-white border"
@@ -284,6 +314,7 @@ export default function ScanPage() {
                 </button>
                 <button
                   type="button"
+                  disabled={submitting}
                   onClick={handleAddAsNewLine}
                   className={`flex-1 rounded-lg p-2 text-sm ${
                     mode === "create" ? "bg-black text-white" : "bg-white border"
@@ -305,6 +336,8 @@ export default function ScanPage() {
           )}
 
           <input
+            aria-label="الكمية المعدودة"
+            disabled={submitting}
             value={quantity}
             onChange={(e) => setQuantity(e.target.value)}
             inputMode="decimal"
@@ -312,6 +345,8 @@ export default function ScanPage() {
             className="w-full border rounded-lg p-3"
           />
           <input
+            aria-label="الموقع (رف / طابق)"
+            disabled={submitting}
             value={location}
             onChange={(e) => setLocation(e.target.value)}
             placeholder="الموقع (رف / طابق)"
@@ -323,6 +358,7 @@ export default function ScanPage() {
           <div className="flex gap-2">
             <button
               type="button"
+              disabled={submitting}
               onClick={resumeScanning}
               className="flex-1 rounded-lg p-3 border"
             >

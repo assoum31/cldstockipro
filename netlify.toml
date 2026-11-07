@@ -1,0 +1,4 @@
+[build]
+  # Install dependencies if they are missing (e.g. a clean source upload), then build.
+  command = "(test -x node_modules/.bin/next || npm ci) && npm run build"
+  publish = ".next"

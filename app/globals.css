@@ -1,8 +1,6 @@
 @import "tailwindcss";
 
-/* Empêche le rebond de scroll (iOS) et le pinch-zoom résiduel sur
-   tout le site — complète maximumScale/userScalable du viewport
-   défini dans layout.tsx (section 5B de la spec). */
+/* Keep touch scrolling responsive while allowing browser zoom. */
 html,
 body {
   overscroll-behavior: none;
