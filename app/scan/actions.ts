@@ -129,12 +129,15 @@ export async function submitCount(input: {
 
     const { error, count } = await supabase
       .from("inventory_logs")
-      .update({
-        counted_quantity: input.countedQuantity,
-        location: input.location,
-      })
+      .update(
+        {
+          counted_quantity: input.countedQuantity,
+          location: input.location,
+        },
+        { count: "exact" }
+      )
       .eq("id", input.logId)
-      .select("id", { count: "exact", head: true });
+      .select("id");
 
     if (error) return { ok: false, error: "فشل تحديث السطر." };
     if (count === 0) {
